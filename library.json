@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/platformio/platformio-core/develop/platformio/assets/schema/library.json",
+  "name": "RadBLE",
+  "version": "1.0.0",
+  "description": "Shared Research and Desire BLE control protocol server for ESP32 firmware",
+  "keywords": ["ble", "esp32", "nimble", "research-and-desire"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/researchanddesire/rad-ble.git"
+  },
+  "authors": [
+    {
+      "name": "Research and Desire",
+      "url": "https://www.researchanddesire.com"
+    }
+  ],
+  "license": "CERN-OHL-S-2.0",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "headers": ["RadBle.h"],
+  "dependencies": {
+    "h2zero/NimBLE-Arduino": "2.4.0",
+    "bblanchon/ArduinoJson": "^7.4.2"
+  },
+  "export": {
+    "include": [
+      "src",
+      "protocol",
+      "examples",
+      "README.md",
+      "LICENSE",
+      "CHANGELOG.md",
+      "library.json"
+    ]
+  }
+}
