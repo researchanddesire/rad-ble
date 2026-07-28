@@ -1958,15 +1958,9 @@ String Server::protocolInfoJson(bool compact) const {
   document["directFilesystemOta"] = hasChannel(config_, CHANNEL_FILESYSTEM_OTA);
   document["channels"] = config_.channels;
   if (!compact) {
-    document["deviceName"] = deviceName_;
-    document["firmwareVersion"] = config_.identity.firmwareVersion == nullptr
-                                      ? "unknown"
-                                      : config_.identity.firmwareVersion;
-    String build =
-        config_.identity.build == nullptr ? "unknown" : config_.identity.build;
-    if (build.length() > 12)
-      build.remove(12);
-    document["build"] = build;
+    // Name, firmware, build, hardware, and flash size live on the dedicated
+    // Device Identity characteristic. Keeping duplicate identity fields out of
+    // Protocol Info guarantees the complete document fits in one ATT value.
     document["maxMtu"] = 512;
     document["maxMessageBytes"] = MAX_MESSAGE_BYTES;
     document["stateHeartbeatMs"] = 1000;

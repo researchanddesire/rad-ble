@@ -17,3 +17,4 @@ jobs:
       - run: python scripts/generate_protocol.py --check
       - run: pip install platformio
       - run: pio pkg pack .
+      - run: pio ci examples/MinimalServer --lib . --board esp32dev
