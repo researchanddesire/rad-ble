@@ -233,7 +233,7 @@ Result Result::failure(const char *code, const char *message) {
   return Result{false, code, message, "{}"};
 }
 
-Server::Server() = default;
+Server::Server() { stateSubscribers_.fill(BLE_HS_CONN_HANDLE_NONE); }
 
 bool Server::begin(NimBLEServer *server, const Config &config) {
   if (server == nullptr)
@@ -607,6 +607,9 @@ bool Server::begin(NimBLEServer *server, const Config &config) {
 
 void Server::end() {
   running_ = false;
+  const auto critical = ble_npl_hw_enter_critical();
+  stateSubscribers_.fill(BLE_HS_CONN_HANDLE_NONE);
+  ble_npl_hw_exit_critical(critical);
   releaseLeaseOutputs();
   if (taskHandle_ == nullptr ||
       xTaskGetCurrentTaskHandle() == static_cast<TaskHandle_t>(taskHandle_))
@@ -1754,6 +1757,7 @@ void Server::onConnect(uint16_t connectionHandle) {
 }
 
 void Server::onDisconnect(uint16_t connectionHandle) {
+  onStateSubscribe(connectionHandle, 0);
   if (otaActive_ && otaOwner_ == connectionHandle) {
     otaOwner_ = 0xffff;
     otaLeaseToken_ = 0;
@@ -1778,6 +1782,39 @@ void Server::onDisconnect(uint16_t connectionHandle) {
       responseCachePayloads_[index].clear();
     }
   }
+}
+
+void Server::onStateSubscribe(uint16_t connectionHandle, uint16_t subValue) {
+  if (config_.callbacks.readSnapshotHandler == nullptr ||
+      connectionHandle == BLE_HS_CONN_HANDLE_NONE)
+    return;
+  const auto critical = ble_npl_hw_enter_critical();
+  for (auto &handle : stateSubscribers_)
+    if (handle == connectionHandle)
+      handle = BLE_HS_CONN_HANDLE_NONE;
+  if (subValue & 1U) {
+    for (auto &handle : stateSubscribers_)
+      if (handle == BLE_HS_CONN_HANDLE_NONE) {
+        handle = connectionHandle;
+        break;
+      }
+  }
+  ble_npl_hw_exit_critical(critical);
+}
+
+void Server::publishStateNotification(const String &payload) {
+  auto *characteristic = surfaces_[static_cast<size_t>(Surface::State)];
+  if (characteristic == nullptr || server_ == nullptr ||
+      server_->getConnectedCount() == 0 || characteristic->getHandle() == 0 ||
+      payload.isEmpty() || payload.length() > MAX_MESSAGE_BYTES)
+    return;
+  const auto critical = ble_npl_hw_enter_critical();
+  const auto subscribers = stateSubscribers_;
+  ble_npl_hw_exit_critical(critical);
+  for (const auto handle : subscribers)
+    if (handle != BLE_HS_CONN_HANDLE_NONE)
+      characteristic->notify(reinterpret_cast<const uint8_t *>(payload.c_str()),
+                             payload.length(), handle);
 }
 
 void Server::publishEvent(const String &eventJson) {
@@ -1847,16 +1884,33 @@ void Server::refreshSnapshots() {
     }
     if (value.length() > MAX_MESSAGE_BYTES)
       continue;
+    const bool separateRead = index == static_cast<size_t>(Surface::State) &&
+                              config_.callbacks.readSnapshotHandler != nullptr;
+    String readValue;
+    if (separateRead) {
+      const String snapshot = config_.callbacks.readSnapshotHandler(
+          Surface::State, config_.context);
+      if (snapshot.isEmpty())
+        continue;
+      readValue = stateSnapshotJson(snapshot);
+      if (readValue.length() > MAX_MESSAGE_BYTES)
+        continue;
+    }
+    const String &storedValue = separateRead ? readValue : value;
     const auto previous = characteristic->getValue();
     const bool changed =
-        previous.size() != value.length() ||
-        memcmp(previous.data(), value.c_str(), value.length()) != 0;
+        previous.size() != storedValue.length() ||
+        memcmp(previous.data(), storedValue.c_str(), storedValue.length()) != 0;
     if (!changed && !forceNotify)
       continue;
-    characteristic->setValue(value.c_str());
+    characteristic->setValue(storedValue.c_str());
     if (server_ != nullptr && server_->getConnectedCount() > 0 &&
-        characteristic->getHandle() != 0)
-      characteristic->notify();
+        characteristic->getHandle() != 0) {
+      if (separateRead)
+        publishStateNotification(value);
+      else
+        characteristic->notify();
+    }
 
     if (index == static_cast<size_t>(Surface::Power) &&
         batteryCharacteristic_ != nullptr) {

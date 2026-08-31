@@ -7,6 +7,7 @@
 
 #include "RadBleProtocol.generated.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -132,6 +133,8 @@ struct Callbacks {
   OtaSafetyHandler otaSafetyHandler;
   LeaseReleaseHandler leaseReleaseHandler;
   StreamSafetyHandler streamSafetyHandler;
+  // Optional full State read value; snapshotHandler still supplies compact notifications.
+  SnapshotHandler readSnapshotHandler;
 };
 
 struct Config {
@@ -152,8 +155,10 @@ public:
   void end();
   void onConnect(uint16_t connectionHandle);
   void onDisconnect(uint16_t connectionHandle);
+  void onStateSubscribe(uint16_t connectionHandle, uint16_t subValue);
   const char *serviceUuid() const;
 
+  void publishStateNotification(const String &payload);
   void publishEvent(const String &eventJson);
   void publishStream(const uint8_t *data, size_t length);
   void publishOtaStatus(const String &statusJson);
@@ -217,6 +222,7 @@ private:
   NimBLECharacteristic *otaStatusCharacteristic_ = nullptr;
   NimBLECharacteristic *batteryCharacteristic_ = nullptr;
   NimBLECharacteristic *surfaces_[static_cast<size_t>(Surface::Count)]{};
+  std::array<uint16_t, MYNEWT_VAL(BLE_MAX_CONNECTIONS)> stateSubscribers_;
   void *queue_ = nullptr;
   void *overflowQueue_ = nullptr;
   void *volatile taskHandle_ = nullptr;
