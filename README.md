@@ -45,6 +45,18 @@ const radble::Config config = {
 
 Invalid combinations are rejected during `Server::begin` with a specific `[RAD BLE] invalid config:` serial message. A channel that represents a capability must have the matching capability bit; filesystem OTA requires application OTA.
 
+Products sharing State with a legacy read contract may set the optional
+`callbacks.readSnapshotHandler`. It is called only for `Surface::State`; its
+full JSON receives the usual state metadata and is stored for GATT reads.
+`snapshotHandler` continues to supply compact notifications and `state.read`
+responses. Forward the State characteristic's `onSubscribe` callback to
+`server.onStateSubscribe(connectionHandle, subValue)` and all disconnects to
+`server.onDisconnect(connectionHandle)`. Use `server.publishStateNotification`
+for additional State notifications: it sends only to subscribed connections and
+never replaces the stored read value. Other asynchronous writers must not put
+partial JSON or command acknowledgments in that characteristic. Products that
+leave `readSnapshotHandler` unset retain the existing behavior.
+
 ## Protocol contract
 
 [`protocol/rad-ble-v1.json`](protocol/rad-ble-v1.json) is authoritative for product service UUIDs, characteristic suffixes and properties, operations, error codes, and size limits. Generated C++ and TypeScript constants keep firmware and clients aligned.
