@@ -57,6 +57,13 @@ never replaces the stored read value. Other asynchronous writers must not put
 partial JSON or command acknowledgments in that characteristic. Products that
 leave `readSnapshotHandler` unset retain the existing behavior.
 
+Device handlers (`target.set`, `input.emit`, setting writes) run on the
+`rad-ble-v1` server task. Its stack is 12288 bytes unless `.taskStackBytes`
+is set. A product whose handlers run state machine transitions, display or
+Wi-Fi work inline should either hand that work to its own task or raise the
+stack. The task logs `[RAD BLE] warning: server task stack headroom N of M
+bytes` once per new low below 1536 bytes, so near-overflows show up in logs.
+
 ## Protocol contract
 
 [`protocol/rad-ble-v1.json`](protocol/rad-ble-v1.json) is authoritative for product service UUIDs, characteristic suffixes and properties, operations, error codes, and size limits. Generated C++ and TypeScript constants keep firmware and clients aligned.

@@ -579,8 +579,11 @@ bool Server::begin(NimBLEServer *server, const Config &config) {
   refreshSnapshots();
   running_ = true;
   TaskHandle_t taskHandle = nullptr;
-  if (xTaskCreate(taskEntry, "rad-ble-v1", 12288, this, 2, &taskHandle) !=
-      pdPASS) {
+  taskStackBytes_ = config_.taskStackBytes == 0 ? DEFAULT_TASK_STACK_BYTES
+                                                : config_.taskStackBytes;
+  lowestStackHeadroom_ = taskStackBytes_;
+  if (xTaskCreate(taskEntry, "rad-ble-v1", taskStackBytes_, this, 2,
+                  &taskHandle) != pdPASS) {
     running_ = false;
     return false;
   }
@@ -815,6 +818,8 @@ void Server::taskLoop() {
                 "BLE command queue is saturated", "{}", "", "");
       handled = true;
     }
+    if (handled)
+      checkStackHeadroom();
     expireLease();
     expireOtaResume();
     if (millis() - lastRefreshAt_ >= 250)
@@ -824,6 +829,18 @@ void Server::taskLoop() {
   }
   taskHandle_ = nullptr;
   vTaskDelete(nullptr);
+}
+
+void Server::checkStackHeadroom() {
+  // ESP-IDF reports the high-water mark in bytes. Warn once per new low so a
+  // handler that nearly overflows the task shows up before it crashes.
+  const uint32_t headroom = uxTaskGetStackHighWaterMark(nullptr);
+  if (headroom >= LOW_STACK_WARNING_BYTES || headroom >= lowestStackHeadroom_)
+    return;
+  lowestStackHeadroom_ = headroom;
+  Serial.printf("[RAD BLE] warning: server task stack headroom %u of %u bytes\n",
+                static_cast<unsigned>(headroom),
+                static_cast<unsigned>(taskStackBytes_));
 }
 
 void Server::dispatch(const QueueMessage &message) {
