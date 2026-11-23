@@ -40,3 +40,13 @@ class ManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReleaseVersionTests(unittest.TestCase):
+    def test_library_json_matches_reported_library_version(self):
+        # Devices report libraryVersion (generated from the manifest) on the
+        # wire; it must match the published package version.
+        root = Path(__file__).resolve().parents[1]
+        package = json.loads((root / "library.json").read_text())
+        manifest = json.loads((root / "protocol" / "rad-ble-v1.json").read_text())
+        self.assertEqual(package["version"], manifest["libraryVersion"])

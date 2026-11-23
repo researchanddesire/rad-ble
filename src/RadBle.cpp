@@ -1,4 +1,5 @@
 #include "RadBle.h"
+#include "RadBleRequest.h"
 
 #include <Preferences.h>
 #include <Update.h>
@@ -800,8 +801,7 @@ Result Server::handleDeviceName(JsonObjectConst request) {
 
 bool Server::enqueue(uint8_t kind, uint16_t connectionHandle,
                      const uint8_t *data, size_t length) {
-  if (data == nullptr || length == 0 || length > MAX_MESSAGE_BYTES ||
-      queue_ == nullptr) {
+  if (data == nullptr || !fitsRequestQueue(length) || queue_ == nullptr) {
     return false;
   }
   QueueMessage message{};
@@ -879,46 +879,27 @@ void Server::dispatch(const QueueMessage &message) {
 }
 
 void Server::dispatchRequest(const QueueMessage &message) {
+  // Handlers read the requesting connection through currentRequestConnection().
+  struct RequestConnectionScope {
+    uint16_t &slot;
+    RequestConnectionScope(uint16_t &target, uint16_t handle) : slot(target) {
+      slot = handle;
+    }
+    ~RequestConnectionScope() { slot = BLE_HS_CONN_HANDLE_NONE; }
+  } requestConnectionScope(requestConnection_, message.connectionHandle);
+
   JsonDocument document;
-  const auto parseError =
-      deserializeJson(document, message.data, message.length);
-  if (parseError) {
-    sendStage(message.connectionHandle, 0, "failed", false, "invalid_request",
-              "Request is not valid JSON", "{}", "", "");
+  const RequestCheck check = parseRequestEnvelope(
+      document, message.data, message.length, operationForKind(message.kind),
+      message.kind == QUEUE_DEVICE_NAME, message.kind == QUEUE_OTA_CONTROL,
+      esp_random(), PROTOCOL_VERSION);
+  if (!check.ok) {
+    sendStage(message.connectionHandle, check.id, "failed", false, check.code,
+              check.message, "{}", "", "");
     return;
   }
-
-  if (!document["id"].is<uint32_t>())
-    document["id"] = esp_random();
-  if (document["v"].isNull())
-    document["v"] = PROTOCOL_VERSION;
-  if (document["op"].isNull())
-    document["op"] = operationForKind(message.kind);
-  if (message.kind == QUEUE_DEVICE_NAME) {
-    if (document["path"].isNull())
-      document["path"] = "device.name";
-    JsonObject args = document["args"].is<JsonObject>()
-                          ? document["args"].as<JsonObject>()
-                          : document["args"].to<JsonObject>();
-    if (args["value"].isNull() && !document["name"].isNull())
-      args["value"] = document["name"];
-  }
-
-  if (message.kind == QUEUE_OTA_CONTROL &&
-      String(document["op"] | "") == "ota.control") {
-    const String action = document["args"]["action"] | "";
-    if (!action.isEmpty())
-      document["op"] = "ota." + action;
-  }
-
-  const uint32_t id = document["id"].as<uint32_t>();
-  const uint8_t version = document["v"] | 0;
+  const uint32_t id = check.id;
   String operation = document["op"] | "";
-  if (version != PROTOCOL_VERSION || id == 0 || operation.isEmpty()) {
-    sendStage(message.connectionHandle, id, "failed", false, "invalid_request",
-              "v=1, a non-zero id, and op are required", "{}", "", "");
-    return;
-  }
 
   for (size_t index = 0; index < RESPONSE_CACHE_SIZE; ++index) {
     if (responseCacheConnections_[index] == message.connectionHandle &&
