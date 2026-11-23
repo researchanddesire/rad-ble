@@ -187,6 +187,12 @@ private:
   void checkStackHeadroom();
   void dispatch(const QueueMessage &message);
   void dispatchRequest(const QueueMessage &message);
+  bool handleBuiltInRequest(uint16_t connection, uint32_t id,
+                            const String &operation, JsonDocument &document);
+  void dispatchToHandlers(uint16_t connection, uint32_t id,
+                          const String &operation, JsonDocument &document);
+  bool runServerOperation(uint16_t connection, const String &operation,
+                          JsonDocument &document, Result &result);
   void dispatchOtaData(const QueueMessage &message);
   Result handleDeviceName(JsonObjectConst request);
   void refreshDeviceNameCharacteristics(bool notify);

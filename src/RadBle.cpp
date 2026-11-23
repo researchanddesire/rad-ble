@@ -946,18 +946,28 @@ void Server::dispatchRequest(const QueueMessage &message) {
                 operation.c_str(), String(document["path"] | "").c_str());
   Serial.printf("[RAD BLE] receipt id=%lu\n", static_cast<unsigned long>(id));
 
+  if (handleBuiltInRequest(message.connectionHandle, id, operation, document))
+    return;
+  dispatchToHandlers(message.connectionHandle, id, operation, document);
+}
+
+// Built-in operations answered by the server itself. Kept out of line so their
+// temporaries are not on the stack while a product handler runs.
+__attribute__((noinline)) bool
+Server::handleBuiltInRequest(uint16_t connection, uint32_t id,
+                             const String &operation, JsonDocument &document) {
   if (operation == "control.acquire") {
     const uint32_t now = millis();
-    if (otaActive_ && otaOwner_ == message.connectionHandle) {
-      sendStage(message.connectionHandle, id, "failed", false, "busy",
+    if (otaActive_ && otaOwner_ == connection) {
+      sendStage(connection, id, "failed", false, "busy",
                 "Renew the existing lease while OTA is active", "{}", "", "");
-      return;
+      return true;
     }
-    if (leaseOwner_ != 0xffff && leaseOwner_ != message.connectionHandle &&
+    if (leaseOwner_ != 0xffff && leaseOwner_ != connection &&
         !deadlinePassed(now, leaseExpiresAt_)) {
-      sendStage(message.connectionHandle, id, "failed", false, "lease_conflict",
+      sendStage(connection, id, "failed", false, "lease_conflict",
                 "Another client owns the control lease", "{}", "", "");
-      return;
+      return true;
     }
     if (leaseOwner_ != 0xffff && deadlinePassed(now, leaseExpiresAt_)) {
       releaseLeaseOutputs();
@@ -967,44 +977,44 @@ void Server::dispatchRequest(const QueueMessage &message) {
     }
     uint32_t ttlSeconds = document["args"]["ttl"] | 10U;
     ttlSeconds = constrain(ttlSeconds, 1U, 30U);
-    leaseOwner_ = message.connectionHandle;
+    leaseOwner_ = connection;
     leaseToken_ = esp_random();
     if (leaseToken_ == 0)
       leaseToken_ = 1;
     leaseExpiresAt_ = now + ttlSeconds * 1000U;
     String result = "{\"lease\":" + String(leaseToken_) +
                     ",\"ttlMs\":" + String(ttlSeconds * 1000U) + "}";
-    sendStage(message.connectionHandle, id, "completed", true, "", "", result,
+    sendStage(connection, id, "completed", true, "", "", result,
               currentStateName(), currentStateName());
     publishEvent("{\"event\":\"control.lease.acquired\",\"ttlMs\":" +
                  String(ttlSeconds * 1000U) + "}");
-    return;
+    return true;
   }
 
   if (operation == "control.renew") {
     const uint32_t token = document["lease"] | 0U;
-    if (!hasValidLease(message.connectionHandle, token)) {
-      sendStage(message.connectionHandle, id, "failed", false, "lease_required",
+    if (!hasValidLease(connection, token)) {
+      sendStage(connection, id, "failed", false, "lease_required",
                 "The control lease is missing or stale", "{}", "", "");
-      return;
+      return true;
     }
     uint32_t ttlSeconds = document["args"]["ttl"] | 10U;
     ttlSeconds = constrain(ttlSeconds, 1U, 30U);
     leaseExpiresAt_ = millis() + ttlSeconds * 1000U;
-    sendStage(message.connectionHandle, id, "completed", true, "", "",
+    sendStage(connection, id, "completed", true, "", "",
               "{\"ttlMs\":" + String(ttlSeconds * 1000U) + "}",
               currentStateName(), currentStateName());
-    return;
+    return true;
   }
 
   if (operation == "control.release") {
     const uint32_t token = document["lease"] | 0U;
-    if (!hasValidLease(message.connectionHandle, token)) {
-      sendStage(message.connectionHandle, id, "failed", false, "lease_required",
+    if (!hasValidLease(connection, token)) {
+      sendStage(connection, id, "failed", false, "lease_required",
                 "The control lease is missing or stale", "{}", "", "");
-      return;
+      return true;
     }
-    if (otaActive_ && otaOwner_ == message.connectionHandle)
+    if (otaActive_ && otaOwner_ == connection)
       abortOta("lease_released", "OTA stopped when its lease was released");
     streamActive_ = false;
     streamRateHz_ = 0;
@@ -1012,16 +1022,16 @@ void Server::dispatchRequest(const QueueMessage &message) {
     leaseOwner_ = 0xffff;
     leaseToken_ = 0;
     leaseExpiresAt_ = 0;
-    sendStage(message.connectionHandle, id, "completed", true, "", "", "{}",
+    sendStage(connection, id, "completed", true, "", "", "{}",
               currentStateName(), currentStateName());
     publishEvent(R"({"event":"control.lease.released"})");
-    return;
+    return true;
   }
 
   if (operation == "device.capabilities") {
-    sendStage(message.connectionHandle, id, "completed", true, "", "",
+    sendStage(connection, id, "completed", true, "", "",
               protocolInfoJson(true), "", "");
-    return;
+    return true;
   }
 
   if (operation == "ota.capabilities") {
@@ -1048,9 +1058,9 @@ void Server::dispatchRequest(const QueueMessage &message) {
         "\"components\":[\"application\"" +
         (hasChannel(config_, CHANNEL_FILESYSTEM_OTA) ? ",\"filesystem\"]}"
                                                      : "]}");
-    sendStage(message.connectionHandle, id, "completed", true, "", "", result,
+    sendStage(connection, id, "completed", true, "", "", result,
               currentStateName(), currentStateName());
-    return;
+    return true;
   }
 
   if (operation == "catalog.read") {
@@ -1058,9 +1068,9 @@ void Server::dispatchRequest(const QueueMessage &message) {
     // A descriptor plus the correlated response envelope must fit in one
     // 509-byte ATT value. Verbose constraints make multi-item pages unsafe.
     const size_t pageSize = 1;
-    sendStage(message.connectionHandle, id, "completed", true, "", "",
+    sendStage(connection, id, "completed", true, "", "",
               catalogPageJson(page, pageSize), "", "");
-    return;
+    return true;
   }
 
   if (operation == "state.read") {
@@ -1069,26 +1079,26 @@ void Server::dispatchRequest(const QueueMessage &message) {
     // The state is already present in result. Repeating it as stateBefore
     // and stateAfter can push a valid response beyond conservative ATT
     // payloads used by some centrals.
-    sendStage(message.connectionHandle, id, "completed", true, "", "", state,
+    sendStage(connection, id, "completed", true, "", "", state,
               "", "");
-    return;
+    return true;
   }
 
   if (operation == "sensor.read" &&
       String(document["path"] | "") == "essential.live") {
     const String essential =
         config_.callbacks.snapshotHandler(Surface::Essential, config_.context);
-    sendStage(message.connectionHandle, id, "completed", true, "", "",
+    sendStage(connection, id, "completed", true, "", "",
               essential, currentStateName(), currentStateName());
-    return;
+    return true;
   }
 
   if (operation == "wifi.status") {
     const String status = config_.callbacks.snapshotHandler(
         Surface::Connectivity, config_.context);
-    sendStage(message.connectionHandle, id, "completed", true, "", "", status,
+    sendStage(connection, id, "completed", true, "", "", status,
               currentStateName(), currentStateName());
-    return;
+    return true;
   }
 
   if (operation == "output.read") {
@@ -1105,25 +1115,25 @@ void Server::dispatchRequest(const QueueMessage &message) {
     if (!readableOutput || !streamSurfaceFor(path, surface) ||
         (surface != Surface::Indicator && surface != Surface::Haptic &&
          surface != Surface::Audio && surface != Surface::Display)) {
-      sendStage(message.connectionHandle, id, "failed", false, "unknown_path",
+      sendStage(connection, id, "failed", false, "unknown_path",
                 "Output path is not readable", "{}", currentStateName(),
                 currentStateName());
-      return;
+      return true;
     }
     const String value =
         config_.callbacks.snapshotHandler(surface, config_.context);
-    sendStage(message.connectionHandle, id, "completed", true, "", "", value,
+    sendStage(connection, id, "completed", true, "", "", value,
               currentStateName(), currentStateName());
-    return;
+    return true;
   }
 
   if (operation == "sensor.readMany") {
     const JsonArrayConst paths = document["args"]["paths"].as<JsonArrayConst>();
     if (paths.isNull() || paths.size() == 0 || paths.size() > 2) {
-      sendStage(message.connectionHandle, id, "failed", false, "invalid_value",
+      sendStage(connection, id, "failed", false, "invalid_value",
                 "paths must contain 1..2 entries", "{}", currentStateName(),
                 currentStateName());
-      return;
+      return true;
     }
     JsonDocument combined;
     JsonArray values = combined["values"].to<JsonArray>();
@@ -1155,66 +1165,90 @@ void Server::dispatchRequest(const QueueMessage &message) {
     }
     String result;
     serializeJson(combined, result);
-    sendStage(message.connectionHandle, id, allOk ? "completed" : "failed",
+    sendStage(connection, id, allOk ? "completed" : "failed",
               allOk, allOk ? "" : "unknown_path",
               allOk ? "" : "One or more sensor paths failed", result,
               currentStateName(), currentStateName());
-    return;
+    return true;
   }
 
   if (operation == "stream.start" || operation == "stream.update" ||
       operation == "stream.stop") {
     const String before = currentStateName();
     if (streamCharacteristic_ == nullptr) {
-      sendStage(message.connectionHandle, id, "failed", false, "unsupported",
+      sendStage(connection, id, "failed", false, "unsupported",
                 "Sensor streaming is unavailable", "{}", before, before);
-      return;
+      return true;
     }
     const uint32_t token = document["lease"] | 0U;
-    if (!hasValidLease(message.connectionHandle, token)) {
-      sendStage(message.connectionHandle, id, "failed", false, "lease_required",
+    if (!hasValidLease(connection, token)) {
+      sendStage(connection, id, "failed", false, "lease_required",
                 "Acquire a control lease first", "{}", before, before);
-      return;
+      return true;
     }
-    sendStage(message.connectionHandle, id, "accepted", true, "", "", "{}",
+    sendStage(connection, id, "accepted", true, "", "", "{}",
               before, before);
     const Result result = configureStream(document.as<JsonObjectConst>());
-    sendStage(message.connectionHandle, id, result.ok ? "completed" : "failed",
+    sendStage(connection, id, result.ok ? "completed" : "failed",
               result.ok, result.code.c_str(), result.message.c_str(),
               result.resultJson, before, currentStateName());
-    return;
+    return true;
   }
 
+  return false;
+}
+
+// State and lease gating, then the operation. The frame stays small: product
+// handlers (state machine transitions, display, Wi-Fi) run below it on the
+// server task's stack.
+__attribute__((noinline)) void
+Server::dispatchToHandlers(uint16_t connection, uint32_t id,
+                           const String &operation, JsonDocument &document) {
   const String before = currentStateName();
   const String requiredState = document["ifState"] | "";
   if (!requiredState.isEmpty() && requiredState != before) {
-    sendStage(message.connectionHandle, id, "failed", false, "invalid_state",
+    sendStage(connection, id, "failed", false, "invalid_state",
               "State precondition did not match", "{}", before, before);
     return;
   }
 
   if (!operationIsReadOnly(operation)) {
     const uint32_t token = document["lease"] | 0U;
-    if (!hasValidLease(message.connectionHandle, token)) {
-      sendStage(message.connectionHandle, id, "failed", false, "lease_required",
+    if (!hasValidLease(connection, token)) {
+      sendStage(connection, id, "failed", false, "lease_required",
                 "Acquire a control lease first", "{}", before, before);
       return;
     }
     if (otaActive_ && !operation.startsWith("ota.")) {
-      sendStage(message.connectionHandle, id, "failed", false, "busy",
+      sendStage(connection, id, "failed", false, "busy",
                 "Direct OTA owns the device", "{}", before, before);
       return;
     }
-    sendStage(message.connectionHandle, id, "accepted", true, "", "", "{}",
+    sendStage(connection, id, "accepted", true, "", "", "{}",
               before, before);
   }
 
   activeOperation_ = operation;
   Result result;
+  if (!runServerOperation(connection, operation, document, result))
+    result = config_.callbacks.commandHandler(document.as<JsonObjectConst>(),
+                                              config_.context);
+  activeOperation_.clear();
+  const String after = currentStateName();
+  sendStage(connection, id, result.ok ? "completed" : "failed",
+            result.ok, result.code.c_str(), result.message.c_str(),
+            result.resultJson, before, after);
+}
+
+// OTA, Wi-Fi, restart and device-name operations the server implements.
+// Returns false for operations the product's command handler serves.
+__attribute__((noinline)) bool
+Server::runServerOperation(uint16_t connection, const String &operation,
+                           JsonDocument &document, Result &result) {
   const String otaTransport = document["args"]["transport"] | "ble";
   if (operation == "ota.begin" ||
       (operation == "ota.start" && otaTransport != "wifi"))
-    result = beginOta(document.as<JsonObjectConst>(), message.connectionHandle);
+    result = beginOta(document.as<JsonObjectConst>(), connection);
   else if (operation == "ota.resume") {
     const uint32_t session = document["args"]["session"] | 0U;
     if (!otaActive_ || otaOwner_ != 0xffff || session != otaSession_ ||
@@ -1223,7 +1257,7 @@ void Server::dispatchRequest(const QueueMessage &message) {
       result = Result::failure("invalid_session",
                                "No resumable OTA session matches");
     } else {
-      otaOwner_ = message.connectionHandle;
+      otaOwner_ = connection;
       otaLeaseToken_ = document["lease"] | 0U;
       otaResumeExpiresAt_ = 0;
       result = Result::success("{\"session\":" + String(otaSession_) +
@@ -1236,7 +1270,7 @@ void Server::dispatchRequest(const QueueMessage &message) {
     }
   } else if (operation == "ota.finish")
     result =
-        finishOta(document.as<JsonObjectConst>(), message.connectionHandle);
+        finishOta(document.as<JsonObjectConst>(), connection);
   else if (operation == "ota.abort") {
     abortOta("aborted", "OTA was cancelled", false);
     result = Result::success(R"({"aborted":true})");
@@ -1262,13 +1296,8 @@ void Server::dispatchRequest(const QueueMessage &message) {
               operation == "setting.reset")) {
     result = handleDeviceName(document.as<JsonObjectConst>());
   } else
-    result = config_.callbacks.commandHandler(document.as<JsonObjectConst>(),
-                                              config_.context);
-  activeOperation_.clear();
-  const String after = currentStateName();
-  sendStage(message.connectionHandle, id, result.ok ? "completed" : "failed",
-            result.ok, result.code.c_str(), result.message.c_str(),
-            result.resultJson, before, after);
+    return false;
+  return true;
 }
 
 void Server::dispatchOtaData(const QueueMessage &message) {

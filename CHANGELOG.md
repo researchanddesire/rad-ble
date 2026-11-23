@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1 - 2026-11-23
+
+- Cut the server task stack used while a product handler runs by about 2.3 KB. `dispatchRequest` was one 3.3 KB frame (every operation's temporaries) that stayed live under the product's command handler. Built-in operations, gating and server-implemented operations now run in separate out-of-line functions, and the frame above a product handler is about 1 KB. An OSSM staging build had overflowed the 12 KB default during Wi-Fi Setup and menu transitions (measured peak 12320 bytes); with this it has about 2 KB of headroom without a bigger stack.
+
 ## 1.2.0 - 2026-11-23
 
 - Add `Server::currentRequestConnection()`: the connection whose request the command handler is serving, so products can tell which central commanded what.
