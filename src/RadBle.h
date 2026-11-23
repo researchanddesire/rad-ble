@@ -165,6 +165,10 @@ public:
   void onDisconnect(uint16_t connectionHandle);
   void onStateSubscribe(uint16_t connectionHandle, uint16_t subValue);
   const char *serviceUuid() const;
+  // The connection whose request is being handled. Valid inside the command
+  // handler (and other request callbacks) on the server task; outside a
+  // request it is BLE_HS_CONN_HANDLE_NONE.
+  uint16_t currentRequestConnection() const { return requestConnection_; }
 
   void publishStateNotification(const String &payload);
   void publishEvent(const String &eventJson);
@@ -235,6 +239,7 @@ private:
   void *queue_ = nullptr;
   void *overflowQueue_ = nullptr;
   void *volatile taskHandle_ = nullptr;
+  uint16_t requestConnection_ = BLE_HS_CONN_HANDLE_NONE;
   uint32_t taskStackBytes_ = DEFAULT_TASK_STACK_BYTES;
   uint32_t lowestStackHeadroom_ = DEFAULT_TASK_STACK_BYTES;
   volatile bool running_ = false;

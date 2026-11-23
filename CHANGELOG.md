@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 - 2026-11-23
+
+- Add `Server::currentRequestConnection()`: the connection whose request the command handler is serving, so products can tell which central commanded what.
+- Move request envelope parsing into `RadBleRequest.h` (`parseRequestEnvelope`, `fitsRequestQueue`), host-compiled and tested in `tests/native` with AddressSanitizer and UBSan: malformed, truncated, binary, deeply nested, non-object and oversized input.
+- Reject a protocol version that is not the integer 1. Previously `"v": 257` wrapped to 1 and was accepted. Also reject non-string `op` and non-object JSON with a clear message.
+- Report the correct `libraryVersion`. 1.1.0 still reported 1.0.0; a test now ties `library.json` to the manifest.
+
 ## 1.1.0 - 2026-11-23
 
 - Add the optional `readSnapshotHandler` callback: full state reads stay complete while state notifications stay compact (first shipped untagged in OSSM firmware).

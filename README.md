@@ -64,6 +64,14 @@ Wi-Fi work inline should either hand that work to its own task or raise the
 stack. The task logs `[RAD BLE] warning: server task stack headroom N of M
 bytes` once per new low below 1536 bytes, so near-overflows show up in logs.
 
+Inside a request callback, `server.currentRequestConnection()` returns the
+connection handle that sent the request, for example to track which central
+last commanded motion. Outside a request it is `BLE_HS_CONN_HANDLE_NONE`.
+
+Request envelope parsing lives in `src/RadBleRequest.h` and has host tests in
+`tests/native`. Run them with `ARDUINOJSON_INCLUDE=<dir with ArduinoJson.h>
+python3 -m unittest discover -s tests`; CI downloads the header.
+
 ## Protocol contract
 
 [`protocol/rad-ble-v1.json`](protocol/rad-ble-v1.json) is authoritative for product service UUIDs, characteristic suffixes and properties, operations, error codes, and size limits. Generated C++ and TypeScript constants keep firmware and clients aligned.

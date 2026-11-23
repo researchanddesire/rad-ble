@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "Research and Desire BLE Control Protocol",
   "protocolVersion": 1,
-  "libraryVersion": "1.0.0",
+  "libraryVersion": "1.2.0",
   "manufacturer": {
     "name": "Research and Desire",
     "website": "https://www.researchanddesire.com"

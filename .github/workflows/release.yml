@@ -15,7 +15,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m unittest discover -s tests
+      - name: Fetch ArduinoJson for the native tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/arduinojson"
+          curl -sSfL -o "$RUNNER_TEMP/arduinojson/ArduinoJson.h" \
+            https://github.com/bblanchon/ArduinoJson/releases/download/v7.4.3/ArduinoJson-v7.4.3.h
+          echo "ARDUINOJSON_INCLUDE=$RUNNER_TEMP/arduinojson" >> "$GITHUB_ENV"
+      - run: python -m unittest discover -s tests -v
       - run: python scripts/generate_protocol.py --check
       - run: pip install platformio
       - run: pio pkg pack .
