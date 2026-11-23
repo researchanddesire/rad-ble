@@ -12,9 +12,36 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/version.h>
 
 namespace radble {
 namespace {
+
+// mbedTLS 3 (ESP-IDF 5, Arduino 3) dropped the *_ret SHA-256 functions that
+// mbedTLS 2 (ESP-IDF 4, Arduino 2) provides; both return int.
+#if MBEDTLS_VERSION_MAJOR >= 3
+int sha256Starts(mbedtls_sha256_context *context) {
+  return mbedtls_sha256_starts(context, 0);
+}
+int sha256Update(mbedtls_sha256_context *context, const uint8_t *data,
+                 size_t length) {
+  return mbedtls_sha256_update(context, data, length);
+}
+int sha256Finish(mbedtls_sha256_context *context, uint8_t *digest) {
+  return mbedtls_sha256_finish(context, digest);
+}
+#else
+int sha256Starts(mbedtls_sha256_context *context) {
+  return mbedtls_sha256_starts_ret(context, 0);
+}
+int sha256Update(mbedtls_sha256_context *context, const uint8_t *data,
+                 size_t length) {
+  return mbedtls_sha256_update_ret(context, data, length);
+}
+int sha256Finish(mbedtls_sha256_context *context, uint8_t *digest) {
+  return mbedtls_sha256_finish_ret(context, digest);
+}
+#endif
 
 enum QueueKind : uint8_t {
   QUEUE_REQUEST = 0,
@@ -1304,7 +1331,7 @@ void Server::dispatchOtaData(const QueueMessage &message) {
              (!otaUsesIdf_ && Update.write(const_cast<uint8_t *>(payload),
                                            payloadLength) != payloadLength)) {
       result = abortOta("write_failed", "Flash write failed", false);
-    } else if (mbedtls_sha256_update_ret(
+    } else if (sha256Update(
                    static_cast<mbedtls_sha256_context *>(otaShaContext_),
                    payload, payloadLength) != 0) {
       result = abortOta("sha_failed", "Could not update SHA-256", false);
@@ -1389,7 +1416,7 @@ Result Server::beginOta(JsonObjectConst request, uint16_t connectionHandle) {
   }
   auto *shaContext = static_cast<mbedtls_sha256_context *>(otaShaContext_);
   mbedtls_sha256_init(shaContext);
-  if (mbedtls_sha256_starts_ret(shaContext, 0) != 0) {
+  if (sha256Starts(shaContext) != 0) {
     if (otaUsesIdf_)
       esp_ota_abort(otaHandle_);
     else
@@ -1414,7 +1441,7 @@ Result Server::beginOta(JsonObjectConst request, uint16_t connectionHandle) {
   publishOtaStatus("{\"stage\":\"accepted\",\"ok\":true,\"result\":" + result +
                    "}");
   Serial.printf("[RAD BLE] direct OTA session %u started (%u bytes)\n",
-                otaSession_, static_cast<unsigned>(size));
+                static_cast<unsigned>(otaSession_), static_cast<unsigned>(size));
   return Result::success(result);
 }
 
@@ -1428,8 +1455,8 @@ Result Server::finishOta(JsonObjectConst request, uint16_t connectionHandle) {
     return Result::failure("incomplete_image", "OTA image is incomplete");
 
   uint8_t digest[32];
-  if (mbedtls_sha256_finish_ret(
-          static_cast<mbedtls_sha256_context *>(otaShaContext_), digest) != 0)
+  if (sha256Finish(static_cast<mbedtls_sha256_context *>(otaShaContext_),
+                   digest) != 0)
     return abortOta("sha_failed", "Could not finalize SHA-256", false);
   const String actualSha256 = digestHex(digest, sizeof(digest));
   if (actualSha256 != otaExpectedSha256_)
