@@ -137,6 +137,13 @@ struct Callbacks {
   SnapshotHandler readSnapshotHandler;
 };
 
+// Stack of the server task when Config::taskStackBytes is 0. Device handlers
+// (target.set, input.emit, ...) run on this task, so products whose handlers
+// do heavy work (state machine transitions, display, Wi-Fi) size it up.
+inline constexpr uint32_t DEFAULT_TASK_STACK_BYTES = 12288;
+// The server task logs a warning when its remaining stack drops below this.
+inline constexpr uint32_t LOW_STACK_WARNING_BYTES = 1536;
+
 struct Config {
   Identity identity;
   uint32_t capabilities;
@@ -145,6 +152,7 @@ struct Config {
   size_t resourceCount;
   Callbacks callbacks;
   void *context;
+  uint32_t taskStackBytes = 0;  // 0 = DEFAULT_TASK_STACK_BYTES
 };
 
 class Server {
@@ -172,6 +180,7 @@ private:
   struct QueueMessage;
   static void taskEntry(void *parameter);
   void taskLoop();
+  void checkStackHeadroom();
   void dispatch(const QueueMessage &message);
   void dispatchRequest(const QueueMessage &message);
   void dispatchOtaData(const QueueMessage &message);
@@ -226,6 +235,8 @@ private:
   void *queue_ = nullptr;
   void *overflowQueue_ = nullptr;
   void *volatile taskHandle_ = nullptr;
+  uint32_t taskStackBytes_ = DEFAULT_TASK_STACK_BYTES;
+  uint32_t lowestStackHeadroom_ = DEFAULT_TASK_STACK_BYTES;
   volatile bool running_ = false;
   uint16_t leaseOwner_ = 0xffff;
   uint32_t leaseToken_ = 0;
