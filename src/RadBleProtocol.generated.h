@@ -7,7 +7,7 @@
 namespace radble {
 
 inline constexpr uint8_t PROTOCOL_VERSION = 1;
-inline constexpr char LIBRARY_VERSION[] = "1.2.1";
+inline constexpr char LIBRARY_VERSION[] = "1.2.2";
 inline constexpr size_t MAX_MESSAGE_BYTES = 509;
 inline constexpr size_t STREAM_HEADER_BYTES = 20;
 inline constexpr size_t DEVICE_NAME_MAX_BYTES = 24;
