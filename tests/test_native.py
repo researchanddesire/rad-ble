@@ -30,7 +30,8 @@ class NativeTests(unittest.TestCase):
                     [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                      "-fsanitize=address,undefined", "-g",
                      "-I", str(ROOT / "src"), "-I", include,
-                     str(source), "-o", str(binary)],
+                     str(source), str(ROOT / "src" / "RadBleResponse.cpp"),
+                     "-o", str(binary)],
                     capture_output=True, text=True)
                 self.assertEqual(compiled.returncode, 0, compiled.stderr)
                 ran = subprocess.run([str(binary)], capture_output=True, text=True)

@@ -247,6 +247,7 @@ bool persistDeviceName(const String &name) {
 }
 
 struct Server::QueueMessage {
+  uint32_t session;
   uint8_t kind;
   uint16_t connectionHandle;
   uint16_t length;
@@ -322,8 +323,6 @@ bool Server::begin(NimBLEServer *server, const Config &config) {
   deviceName_ = loadDeviceName(config_.identity.deviceName == nullptr
                                    ? config_.identity.deviceType
                                    : config_.identity.deviceName);
-  for (size_t index = 0; index < RESPONSE_CACHE_SIZE; ++index)
-    responseCacheConnections_[index] = 0xffff;
   queue_ = xQueueCreate(16, sizeof(QueueMessage));
   overflowQueue_ = xQueueCreate(16, sizeof(QueueMessage));
   if (queue_ == nullptr || overflowQueue_ == nullptr)
@@ -401,8 +400,17 @@ bool Server::begin(NimBLEServer *server, const Config &config) {
   responseCharacteristic_ = service_->createCharacteristic(
       characteristicUuidValue,
       NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::INDICATE, MAX_MESSAGE_BYTES);
+  // NimBLE's readable value keeps its capacity when shortened. Reserve it
+  // before serving traffic so later full readbacks cannot fail to grow.
+  static constexpr char ready[] =
+      R"({"v":1,"id":0,"stage":"completed","ok":true,"result":{"ready":true}})";
+  memset(responseFrame_.bytes, ' ', MAX_MESSAGE_BYTES);
+  memcpy(responseFrame_.bytes, ready, sizeof(ready) - 1);
   responseCharacteristic_->setValue(
-      R"({"v":1,"id":0,"stage":"completed","ok":true,"result":{"ready":true}})");
+      reinterpret_cast<const uint8_t *>(responseFrame_.bytes), MAX_MESSAGE_BYTES);
+  if (responseCharacteristic_->getLength() != MAX_MESSAGE_BYTES)
+    return false;
+  responseCharacteristic_->setValue(ready);
 
   characteristicUuid(config_.identity.serviceUuid, EVENT_CHARACTERISTIC_SUFFIX,
                      characteristicUuidValue);
@@ -640,6 +648,7 @@ void Server::end() {
   running_ = false;
   const auto critical = ble_npl_hw_enter_critical();
   stateSubscribers_.fill(BLE_HS_CONN_HANDLE_NONE);
+  responseSessions_.closeAll();
   ble_npl_hw_exit_critical(critical);
   releaseLeaseOutputs();
   if (taskHandle_ == nullptr ||
@@ -805,6 +814,9 @@ bool Server::enqueue(uint8_t kind, uint16_t connectionHandle,
     return false;
   }
   QueueMessage message{};
+  message.session = responseSession(connectionHandle, true);
+  if (!message.session)
+    return false;
   message.kind = kind;
   message.connectionHandle = connectionHandle;
   message.length = static_cast<uint16_t>(length);
@@ -825,11 +837,17 @@ void Server::taskLoop() {
     bool handled = false;
     while (xQueueReceive(static_cast<QueueHandle_t>(queue_), &message, 0) ==
            pdTRUE) {
+      if (message.session != responseSession(message.connectionHandle))
+        continue;
+      currentResponseSession_ = message.session;
       dispatch(message);
       handled = true;
     }
     while (xQueueReceive(static_cast<QueueHandle_t>(overflowQueue_), &message,
                          0) == pdTRUE) {
+      if (message.session != responseSession(message.connectionHandle))
+        continue;
+      currentResponseSession_ = message.session;
       if (message.kind == QUEUE_OTA_DATA) {
         publishOtaStatus(
             R"({"stage":"failed","ok":false,"code":"busy","message":"BLE command queue is saturated"})");
@@ -841,8 +859,9 @@ void Server::taskLoop() {
       if (deserializeJson(document, message.data, message.length) ==
           DeserializationError::Ok)
         id = document["id"] | 0U;
-      sendStage(message.connectionHandle, id, "failed", false, "busy",
-                "BLE command queue is saturated", "{}", "", "");
+      if (!replayResponse(message.connectionHandle, id))
+        sendStage(message.connectionHandle, id, "failed", false, "busy",
+                  "BLE command queue is saturated", "{}", "", "");
       handled = true;
     }
     if (handled)
@@ -899,17 +918,9 @@ void Server::dispatchRequest(const QueueMessage &message) {
     return;
   }
   const uint32_t id = check.id;
+  if (replayResponse(message.connectionHandle, id))
+    return;
   String operation = document["op"] | "";
-
-  for (size_t index = 0; index < RESPONSE_CACHE_SIZE; ++index) {
-    if (responseCacheConnections_[index] == message.connectionHandle &&
-        responseCacheIds_[index] == id &&
-        !responseCachePayloads_[index].isEmpty()) {
-      sendSerialized(message.connectionHandle, responseCachePayloads_[index],
-                     false);
-      return;
-    }
-  }
 
   if (operation == "catalog.list")
     operation = "catalog.read";
@@ -982,8 +993,10 @@ Server::handleBuiltInRequest(uint16_t connection, uint32_t id,
     if (leaseToken_ == 0)
       leaseToken_ = 1;
     leaseExpiresAt_ = now + ttlSeconds * 1000U;
-    String result = "{\"lease\":" + String(leaseToken_) +
-                    ",\"ttlMs\":" + String(ttlSeconds * 1000U) + "}";
+    char result[48];
+    snprintf(result, sizeof(result), "{\"lease\":%lu,\"ttlMs\":%lu}",
+             static_cast<unsigned long>(leaseToken_),
+             static_cast<unsigned long>(ttlSeconds * 1000U));
     sendStage(connection, id, "completed", true, "", "", result,
               currentStateName(), currentStateName());
     publishEvent("{\"event\":\"control.lease.acquired\",\"ttlMs\":" +
@@ -1001,8 +1014,10 @@ Server::handleBuiltInRequest(uint16_t connection, uint32_t id,
     uint32_t ttlSeconds = document["args"]["ttl"] | 10U;
     ttlSeconds = constrain(ttlSeconds, 1U, 30U);
     leaseExpiresAt_ = millis() + ttlSeconds * 1000U;
-    sendStage(connection, id, "completed", true, "", "",
-              "{\"ttlMs\":" + String(ttlSeconds * 1000U) + "}",
+    char result[24];
+    snprintf(result, sizeof(result), "{\"ttlMs\":%lu}",
+             static_cast<unsigned long>(ttlSeconds * 1000U));
+    sendStage(connection, id, "completed", true, "", "", result,
               currentStateName(), currentStateName());
     return true;
   }
@@ -1188,9 +1203,11 @@ Server::handleBuiltInRequest(uint16_t connection, uint32_t id,
     }
     sendStage(connection, id, "accepted", true, "", "", "{}",
               before, before);
+    if (responseSession(connection) != currentResponseSession_)
+      return true;
     const Result result = configureStream(document.as<JsonObjectConst>());
     sendStage(connection, id, result.ok ? "completed" : "failed",
-              result.ok, result.code.c_str(), result.message.c_str(),
+              result.ok, result.code, result.message,
               result.resultJson, before, currentStateName());
     return true;
   }
@@ -1226,6 +1243,9 @@ Server::dispatchToHandlers(uint16_t connection, uint32_t id,
     }
     sendStage(connection, id, "accepted", true, "", "", "{}",
               before, before);
+    // A disconnect may have released this lease during indication retries.
+    if (responseSession(connection) != currentResponseSession_)
+      return;
   }
 
   activeOperation_ = operation;
@@ -1236,7 +1256,7 @@ Server::dispatchToHandlers(uint16_t connection, uint32_t id,
   activeOperation_.clear();
   const String after = currentStateName();
   sendStage(connection, id, result.ok ? "completed" : "failed",
-            result.ok, result.code.c_str(), result.message.c_str(),
+            result.ok, result.code, result.message,
             result.resultJson, before, after);
 }
 
@@ -1811,6 +1831,9 @@ void Server::onConnect(uint16_t connectionHandle) {
 }
 
 void Server::onDisconnect(uint16_t connectionHandle) {
+  const auto critical = ble_npl_hw_enter_critical();
+  responseSessions_.close(connectionHandle);
+  ble_npl_hw_exit_critical(critical);
   onStateSubscribe(connectionHandle, 0);
   if (otaActive_ && otaOwner_ == connectionHandle) {
     otaOwner_ = 0xffff;
@@ -1828,13 +1851,6 @@ void Server::onDisconnect(uint16_t connectionHandle) {
     leaseOwner_ = 0xffff;
     leaseToken_ = 0;
     leaseExpiresAt_ = 0;
-  }
-  for (size_t index = 0; index < RESPONSE_CACHE_SIZE; ++index) {
-    if (responseCacheConnections_[index] == connectionHandle) {
-      responseCacheConnections_[index] = 0xffff;
-      responseCacheIds_[index] = 0;
-      responseCachePayloads_[index].clear();
-    }
   }
 }
 
@@ -2138,66 +2154,60 @@ String Server::catalogPageJson(size_t page, size_t pageSize) const {
   return output;
 }
 
-void Server::sendStage(uint16_t connectionHandle, uint32_t id,
-                       const char *stage, bool ok, const char *code,
-                       const char *message, const String &resultJson,
-                       const String &stateBefore, const String &stateAfter) {
-  JsonDocument document;
-  document["v"] = PROTOCOL_VERSION;
-  document["id"] = id;
-  document["stage"] = stage;
-  document["ok"] = ok;
-  if (code != nullptr && code[0] != '\0')
-    document["code"] = code;
-  else if (ok && strcmp(stage, "completed") == 0)
-    document["code"] = "ok";
-  if (message != nullptr && message[0] != '\0')
-    document["message"] = message;
-  if (!stateBefore.isEmpty())
-    document["stateBefore"] = stateBefore;
-  if (!stateAfter.isEmpty())
-    document["stateAfter"] = stateAfter;
-
-  String payload;
-  serializeJson(document, payload);
-  if (!resultJson.isEmpty() && payload.endsWith("}")) {
-    // Result JSON is produced by trusted firmware handlers and is already
-    // serialized. Embedding it avoids a second dynamic JsonDocument, which
-    // can fail on memory-constrained devices and silently omit lease or
-    // catalog data from an otherwise successful response.
-    payload.remove(payload.length() - 1);
-    payload += ",\"result\":";
-    payload += resultJson;
-    payload += "}";
-  }
-  if (payload.length() > MAX_MESSAGE_BYTES) {
-    payload = "{\"v\":1,\"id\":" + String(id) +
-              ",\"stage\":\"failed\",\"ok\":false,"
-              "\"code\":\"response_too_large\"}";
-  }
-  sendSerialized(connectionHandle, payload,
-                 strcmp(stage, "completed") == 0 ||
-                     strcmp(stage, "failed") == 0);
-  if (strcmp(stage, "completed") == 0 || strcmp(stage, "failed") == 0)
-    Serial.printf("[RAD BLE] terminal id=%lu stage=%s ok=%u code=%s\n",
-                  static_cast<unsigned long>(id), stage, ok ? 1U : 0U,
-                  code != nullptr && code[0] != '\0' ? code : (ok ? "ok" : ""));
+uint32_t Server::responseSession(uint16_t handle, bool create) {
+  const auto critical = ble_npl_hw_enter_critical();
+  const auto session = responseSessions_.get(handle, create);
+  ble_npl_hw_exit_critical(critical);
+  return session;
 }
 
-void Server::sendSerialized(uint16_t connectionHandle, const String &payload,
-                            bool remember) {
-  if (responseCharacteristic_ == nullptr)
+bool Server::replayResponse(uint16_t handle, uint32_t id) {
+  const String *cached = responseCache_.lookup(currentResponseSession_, id);
+  if (!cached) return false;
+  if (cached->isEmpty()) {
+    response::encode(responseFrame_, {id, "failed", false, "resource_unavailable",
+                                     "Original response unavailable", "", "", ""});
+    sendSerialized(handle, responseFrame_.bytes);
+  } else {
+    sendSerialized(handle, *cached);
+  }
+  return true;
+}
+
+void Server::sendStage(uint16_t handle, uint32_t id, const char *stage, bool ok,
+                       response::Text code, response::Text message,
+                       response::Text result, response::Text before,
+                       response::Text after) {
+  const char *wireError = response::encode(
+      responseFrame_, {id, stage, ok, code, message, result, before, after});
+  sendSerialized(handle, responseFrame_.bytes);
+  if (strcmp(stage, "completed") == 0 || strcmp(stage, "failed") == 0) {
+    // No other request is dispatched by this task during indication retries.
+    // Give the transport its first chance at memory before retaining a copy.
+    if (id && !responseCache_.lookup(currentResponseSession_, id))
+      responseCache_.remember(currentResponseSession_, id, responseFrame_);
+    const char *wireCode = wireError ? wireError : code.data;
+    if (!wireCode || !wireCode[0])
+      wireCode = ok ? "ok" : "";
+    Serial.printf("[RAD BLE] terminal id=%lu stage=%s ok=%u code=%s\n",
+                  static_cast<unsigned long>(id), wireError ? "failed" : stage,
+                  !wireError && ok ? 1U : 0U, wireCode);
+  }
+}
+
+void Server::sendSerialized(uint16_t connectionHandle, response::Text payload) {
+  if (!responseCharacteristic_ || responseSession(connectionHandle) != currentResponseSession_)
     return;
-  responseCharacteristic_->setValue(payload.c_str());
+  const auto *bytes = reinterpret_cast<const uint8_t *>(payload.data);
+  responseCharacteristic_->setValue(bytes, payload.size);
   // NimBLE permits only one outstanding indication per connection. A
   // mutation can emit accepted and completed back-to-back, and independent
   // clients may pipeline requests, so wait briefly for the preceding
   // acknowledgement instead of silently dropping the correlated result.
   bool delivered = false;
   for (uint16_t attempt = 0; attempt < 200; ++attempt) {
-    if (responseCharacteristic_->indicate(
-            reinterpret_cast<const uint8_t *>(payload.c_str()),
-            payload.length(), connectionHandle)) {
+    if (responseSession(connectionHandle) != currentResponseSession_) return;
+    if (responseCharacteristic_->indicate(bytes, payload.size, connectionHandle)) {
       delivered = true;
       break;
     }
@@ -2206,16 +2216,7 @@ void Server::sendSerialized(uint16_t connectionHandle, const String &payload,
   if (!delivered)
     Serial.printf("[RAD BLE] response delivery timed out for connection %u\n",
                   connectionHandle);
-  if (remember) {
-    JsonDocument document;
-    if (!deserializeJson(document, payload)) {
-      responseCacheConnections_[responseCacheNext_] = connectionHandle;
-      responseCacheIds_[responseCacheNext_] = document["id"] | 0U;
-      responseCachePayloads_[responseCacheNext_] = payload;
-      responseCacheNext_ = (responseCacheNext_ + 1) % RESPONSE_CACHE_SIZE;
-    }
-  }
-  Serial.printf("[RAD BLE] response %s\n", payload.c_str());
+  Serial.printf("[RAD BLE] response %s\n", payload.data);
 }
 
 } // namespace radble
