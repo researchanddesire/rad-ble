@@ -6,6 +6,7 @@
 #include <esp_ota_ops.h>
 
 #include "RadBleProtocol.generated.h"
+#include "RadBleResponse.h"
 
 #include <array>
 #include <cstddef>
@@ -216,12 +217,13 @@ private:
   Result configureStream(JsonObjectConst request);
   Result handleWifi(JsonObjectConst request);
   bool streamSurfaceFor(const String &path, Surface &surface) const;
-  void sendStage(uint16_t connectionHandle, uint32_t id, const char *stage,
-                 bool ok, const char *code, const char *message,
-                 const String &resultJson, const String &stateBefore,
-                 const String &stateAfter);
-  void sendSerialized(uint16_t connectionHandle, const String &payload,
-                      bool remember);
+  uint32_t responseSession(uint16_t handle, bool create = false);
+  bool replayResponse(uint16_t handle, uint32_t id);
+  void sendStage(uint16_t handle, uint32_t id, const char *stage,
+                 bool ok, response::Text code, response::Text message,
+                 response::Text result, response::Text before,
+                 response::Text after);
+  void sendSerialized(uint16_t handle, response::Text payload);
   bool hasValidLease(uint16_t connectionHandle, uint32_t token) const;
   bool operationIsReadOnly(const String &operation) const;
   NimBLECharacteristic *createSurfaceCharacteristic(NimBLEService *service,
@@ -253,10 +255,10 @@ private:
   uint32_t leaseToken_ = 0;
   uint32_t leaseExpiresAt_ = 0;
   static constexpr size_t RESPONSE_CACHE_SIZE = 4;
-  uint16_t responseCacheConnections_[RESPONSE_CACHE_SIZE]{};
-  uint32_t responseCacheIds_[RESPONSE_CACHE_SIZE]{};
-  String responseCachePayloads_[RESPONSE_CACHE_SIZE];
-  size_t responseCacheNext_ = 0;
+  response::Sessions<MYNEWT_VAL(BLE_MAX_CONNECTIONS)> responseSessions_;
+  uint32_t currentResponseSession_ = 0;
+  response::Frame responseFrame_;
+  response::Cache<String, RESPONSE_CACHE_SIZE> responseCache_;
   uint32_t lastRefreshAt_ = 0;
   uint32_t lastStateHeartbeatAt_ = 0;
   uint32_t stateSequence_ = 0;
